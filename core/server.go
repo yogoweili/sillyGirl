@@ -14,12 +14,10 @@ func init() {
 var Tail = "--来自sillyGirl，傻妞技术交流QQ群882314490，电报交流群https://t.me/kczz2021。"
 
 func RunServer() {
-	if sillyGirl.GetBool("enable_http_server", false) == false {
+	if sillyGirl.GetBool("enable_http_server", true) == false {
 		return
 	}
-	Server.GET("/", func(c *gin.Context) {
-		c.String(200, Tail)
-	})
+
 	gin.SetMode(gin.ReleaseMode)
 	logs.Info("开启httpserver----0.0.0.0:" + sillyGirl.Get("port", "8080"))
 	Server.Run("0.0.0.0:" + sillyGirl.Get("port", "8080"))

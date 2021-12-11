@@ -120,6 +120,14 @@ set wxmp encoding_aes_key ?
 
 set wxmp masters w1&w2&w3...
 
+##### 设置公众号关注事件回复
+
+set wxmp subscribe_reply 感谢关注！
+
+##### 设置公众号默认回复
+
+set wxmp default_reply 无法回复该消息
+
 ##### 傻妞内置微信插件，依赖于[可爱猫](https://www.keaimao.com/)和[http-sdk](https://www.vwzx.com/keaimao-http-sdk)
 
 ##### 傻妞远程处理接口 /wx/receive
@@ -147,5 +155,9 @@ set wx sillyGirl_dynamic_ip true
 ##### 设置可爱猫端口
 
 #set wx keaimao_port ?
+
+##### docker运行
+
+docker-compose up -d --build
 
 ![Image text](https://raw.githubusercontent.com/cdle/sillyGirl/main/appreciate.jpg)

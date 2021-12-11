@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net/http"
 	"os"
 	"regexp"
 	"strings"
@@ -23,15 +24,16 @@ var o = NewBucket("otto")
 func init() {
 	go func() {
 		time.Sleep(time.Second)
-		if sillyGirl.GetBool("enable_price", true) {
-			os.MkdirAll("develop/replies", os.ModePerm)
-			if data, err := os.ReadFile("scripts/jd_price.js"); err == nil {
-				os.WriteFile("develop/replies/jd_price.js", data, os.ModePerm)
-			}
-			os.Remove("develop/replies/price.js")
-		} else {
-			os.Remove("develop/replies/jd_price.js")
-		}
+		// if o.GetBool("enable_price", true) {
+		// 	os.MkdirAll("develop/replies", os.ModePerm)
+		// 	if data, err := os.ReadFile("scripts/jd_price.js"); err == nil {
+		// 		os.WriteFile("develop/replies/jd_price.js", data, os.ModePerm)
+		// 	}
+		// 	os.Remove("develop/replies/price.js")
+		// } else {
+		// 	os.Remove("develop/replies/jd_price.js")
+		// }
+		os.Remove("develop/replies/jd_price.js")
 		init123()
 	}()
 }
@@ -69,9 +71,9 @@ var OttoFuncs = map[string]func(string) string{
 }
 
 func init123() {
-	files, err := ioutil.ReadDir("develop/replies")
+	files, err := ioutil.ReadDir(ExecPath + "/develop/replies")
 	if err != nil {
-		os.MkdirAll("develop/replies", os.ModePerm)
+		os.MkdirAll(ExecPath+"/develop/replies", os.ModePerm)
 		// logs.Warn("打开文件夹%s错误，%v", "develop/replies", err)
 		return
 	}
@@ -82,12 +84,35 @@ func init123() {
 		result, _ = otto.ToValue(o.Get(key, value))
 		return
 	}
-	bucket := func(bucket otto.Value, key otto.Value) (result otto.Value) {
+	bucketGet := func(bucket otto.Value, key otto.Value) (result otto.Value) {
 		result, _ = otto.ToValue(o.Get(key, Bucket(bucket.String()).Get(key.String())))
+		return
+	}
+	bucketSet := func(bucket otto.Value, key otto.Value, value otto.Value) (result otto.Value) {
+		Bucket(bucket.String()).Set(key.String(), value.String())
+		return otto.Value{}
+	}
+	bucketKeys := func(bucket otto.Value) (result otto.Value) {
+		b := Bucket(bucket.String())
+		if !IsBucket(b) {
+			result, _ = otto.ToValue("")
+			return
+		}
+		rt := ""
+		b.Foreach(func(k, _ []byte) error {
+			rt += fmt.Sprintf("%s;", k)
+			return nil
+		})
+		result, _ = otto.ToValue(rt)
 		return
 	}
 	set := func(key otto.Value, value otto.Value) interface{} {
 		o.Set(key.String(), value.String())
+		return otto.Value{}
+	}
+	sleep := func(value otto.Value) interface{} {
+		i, _ := value.ToInteger()
+		time.Sleep(time.Duration(i) * time.Millisecond)
 		return otto.Value{}
 	}
 	push := func(call otto.Value) interface{} {
@@ -98,13 +123,11 @@ func init123() {
 		gid, _ := groupCode.ToInteger()
 		if gid != 0 {
 			if push, ok := GroupPushs[imType.String()]; ok {
-				uid, _ := userID.ToInteger()
-				push(int(gid), int(uid), content.String())
+				push(int(gid), userID, content.String(), "")
 			}
 		} else {
 			if push, ok := Pushs[imType.String()]; ok {
-				uid, _ := userID.ToInteger()
-				push(int(uid), content.String())
+				push(userID, content.String(), nil, "")
 			}
 		}
 		return otto.Value{}
@@ -114,6 +137,7 @@ func init123() {
 		dataType := ""
 		method := "get"
 		body := ""
+
 		{
 			v, _ := call.Object().Get("url")
 			url = v.String()
@@ -126,19 +150,62 @@ func init123() {
 			v, _ := call.Object().Get("body")
 			body = v.String()
 		}
+		{
+			v, _ := call.Object().Get("method")
+			method = v.String()
+		}
 		var req *httplib.BeegoHTTPRequest
+
 		switch strings.ToLower(method) {
 		case "delete":
 			req = httplib.Delete(url)
+
 		case "post":
 			req = httplib.Post(url)
+
 		case "put":
 			req = httplib.Put(url)
+
 		default:
 			req = httplib.Get(url)
 		}
+		{
+			v, err := call.Object().Get("headers")
+			if err == nil && v.IsObject() {
+				headers := v.Object()
+				for _, key := range headers.Keys() {
+					v, _ := headers.Get(key)
+					req.Header(key, v.String())
+				}
+			}
+		}
 		if body != "" {
+			if body != "" && body != "undefined" {
+				req.Body(body)
+				req.Header("Content-Type", "application/json")
+			}
 			req.Body(body)
+		}
+		if dataType == "location" {
+			req.SetCheckRedirect(func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			})
+			rsp, err := req.Response()
+			if err == nil && (rsp.StatusCode == 301 || rsp.StatusCode == 302) {
+				url = rsp.Header.Get("Location")
+			}
+			result, err := otto.ToValue(url)
+			if err != nil {
+				return otto.Value{}
+			}
+			return result
+		}
+		{
+			v, _ := call.Object().Get("useProxy")
+			useProxy, _ := v.ToBoolean()
+			if useProxy && Transport != nil {
+				req.SetTransport(Transport)
+			}
 		}
 		data, err := req.String()
 		if err != nil {
@@ -164,7 +231,7 @@ func init123() {
 		if !strings.Contains(v.Name(), ".js") {
 			continue
 		}
-		jr := string("develop/replies/" + v.Name())
+		jr := ExecPath + "/develop/replies/" + v.Name()
 		data := ""
 		if strings.Contains(jr, "http") {
 			data, err = httplib.Get(jr).String()
@@ -193,7 +260,19 @@ func init123() {
 		if res := regexp.MustCompile(`\[admin:([^\[\]]+)\]`).FindStringSubmatch(data); len(res) != 0 {
 			admin = strings.Trim(res[1], " ") == "true"
 		}
-		if len(rules) == 0 && cron == "" {
+		disable := false
+		if res := regexp.MustCompile(`\[disable:([^\[\]]+)\]`).FindStringSubmatch(data); len(res) != 0 {
+			admin = strings.Trim(res[1], " ") == "true"
+		}
+		priority := 0
+		if res := regexp.MustCompile(`\[priority:([^\[\]]+)\]`).FindStringSubmatch(data); len(res) != 0 {
+			priority = Int(strings.Trim(res[1], " "))
+		}
+		server := ""
+		if res := regexp.MustCompile(`\[server:([^\[\]]+)\]`).FindStringSubmatch(data); len(res) != 0 {
+			server = strings.TrimSpace(res[1])
+		}
+		if len(rules) == 0 && cron == "" && server == "" {
 			logs.Warn("回复：%s无效文件", jr, err)
 			continue
 		}
@@ -240,31 +319,94 @@ func init123() {
 				v, _ := otto.ToValue(s.GetUsername())
 				return v
 			})
+			vm.Set("GetChatname", func() otto.Value {
+				v, _ := otto.ToValue(s.GetChatname())
+				return v
+			})
 			vm.Set("Debug", func(str otto.Value) otto.Value {
 				logs.Debug(str)
 				return otto.Value{}
+			})
+			vm.Set("GroupKick", func(uid otto.Value, reject_add_request otto.Value) {
+				f, _ := reject_add_request.ToBoolean()
+				s.GroupKick(uid.String(), f)
+			})
+			vm.Set("GroupBan", func(uid otto.Value, duration otto.Value) {
+				f, _ := duration.ToInteger()
+				s.GroupBan(uid.String(), int(f))
 			})
 			vm.Set("GetUserID", func() otto.Value {
 				v, _ := otto.ToValue(s.GetUserID())
 				return v
 			})
+			vm.Set("GetContent", func() otto.Value {
+				v, _ := otto.ToValue(s.GetContent())
+				return v
+			})
+			vm.Set("breakIn", func(str otto.Value) otto.Value {
+				s := s.Copy()
+				s.SetContent(str.String())
+				Senders <- s
+				return otto.Value{}
+			})
+			vm.Set("input", func(vs ...otto.Value) interface{} {
+				str := ""
+				var i int64
+				j := ""
+				if len(vs) > 0 {
+					i, _ = vs[0].ToInteger()
+				}
+				if len(vs) > 1 {
+					j, _ = vs[1].ToString()
+				}
+				options := []interface{}{}
+				options = append(options, time.Duration(i)*time.Millisecond)
+				if j != "" {
+					options = append(options, ForGroup)
+				}
+				if rt := s.Await(s, nil, options...); rt != nil {
+					str = rt.(string)
+				}
+				v, _ := otto.ToValue(str)
+				return v
+			})
+
+			vm.Set("sleep", sleep)
+			vm.Set("isAdmin", func() interface{} {
+				if s.IsAdmin() {
+					return otto.TrueValue()
+				}
+				return otto.FalseValue()
+			})
 			vm.Set("set", set)
 			vm.Set("param", param)
 			vm.Set("get", get)
-			vm.Set("bucket", bucket)
+			vm.Set("bucketGet", bucketGet)
+			vm.Set("bucketSet", bucketSet)
+			vm.Set("bucketKeys", bucketKeys)
 			vm.Set("request", request)
 			vm.Set("push", push)
 			vm.Set("sendText", func(call otto.Value) interface{} {
 				s.Reply(call.String())
 				return otto.Value{}
 			})
+			vm.Set("image", func(call otto.Value) interface{} {
+				v, _ := otto.ToValue(`[CQ:image,file=` + call.String() + `]`)
+				return v
+			})
 			vm.Set("sendImage", func(call otto.Value) interface{} {
 				s.Reply(ImageUrl(call.String()))
 				return otto.Value{}
 			})
-			rt, err := vm.Run(template + `
-""
-`)
+			vm.Set("sendVideo", func(call otto.Value) interface{} {
+				url := call.String()
+				if url == "" {
+					return otto.Value{}
+				}
+				s.Reply(VideoUrl(url))
+				return otto.Value{}
+			})
+			rt, err := vm.Run(template)
 			if err != nil {
 				return err
 			}
@@ -273,7 +415,7 @@ func init123() {
 				s.Reply(ImageUrl(v[1]))
 				result = strings.Replace(result, fmt.Sprintf(`[image:%s]\n`, v[1]), "", -1)
 			}
-			if result == "" {
+			if result == "" || result == "undefined" {
 				return nil
 			}
 			return result
@@ -281,10 +423,13 @@ func init123() {
 		logs.Warn("回复：%s添加成功", jr)
 		AddCommand("", []Function{
 			{
-				Handle: handler,
-				Rules:  rules,
-				Cron:   cron,
-				Admin:  admin,
+				Handle:   handler,
+				Rules:    rules,
+				Cron:     cron,
+				Admin:    admin,
+				Priority: priority,
+				Disable:  disable,
+				Server:   server,
 			},
 		})
 	}

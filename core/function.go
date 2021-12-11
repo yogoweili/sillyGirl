@@ -1,14 +1,18 @@
 package core
 
 import (
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"net/url"
 	"os"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/beego/beego/v2/core/logs"
+	"github.com/gin-gonic/gin"
 	cron "github.com/robfig/cron/v3"
 )
 
@@ -20,15 +24,24 @@ func init() {
 }
 
 type Function struct {
-	Rules   []string
-	FindAll bool
-	Admin   bool
-	Handle  func(s Sender) interface{}
-	Cron    string
+	Rules    []string
+	FindAll  bool
+	Admin    bool
+	Handle   func(s Sender) interface{}
+	Cron     string
+	Priority int
+	Disable  bool
+	Server   string
 }
 
-var pname = regexp.MustCompile(`/([^/\s]+)$`).FindStringSubmatch(os.Args[0])[1]
+var getPname = func() string {
+	if runtime.GOOS == "windows" {
+		return regexp.MustCompile(`([\w\.-]*)\.exe$`).FindStringSubmatch(os.Args[0])[0]
+	}
+	return regexp.MustCompile(`/([^/\s]+)$`).FindStringSubmatch(os.Args[0])[1]
+}
 
+var pname = getPname()
 var name = func() string {
 	return sillyGirl.Get("name", "傻妞")
 }
@@ -48,6 +61,9 @@ func initToHandleMessage() {
 
 func AddCommand(prefix string, cmds []Function) {
 	for j := range cmds {
+		if cmds[j].Disable {
+			continue
+		}
 		for i := range cmds[j].Rules {
 			if strings.Contains(cmds[j].Rules[i], "raw ") {
 				cmds[j].Rules[i] = strings.Replace(cmds[j].Rules[i], "raw ", "", -1)
@@ -67,7 +83,30 @@ func AddCommand(prefix string, cmds []Function) {
 			cmds[j].Rules[i] = strings.Replace(cmds[j].Rules[i], "?", `(\S+)`, -1)
 			cmds[j].Rules[i] = "^" + cmds[j].Rules[i] + "$"
 		}
-		functions = append(functions, cmds[j])
+		{
+			lf := len(functions)
+			for i := range functions {
+				f := lf - i - 1
+				// logs.Warn(`functions[f].Priority %d > cmds[j].Priority %d = %t`, functions[f].Priority, cmds[j].Priority, functions[f].Priority > cmds[j].Priority)
+				if functions[f].Priority > cmds[j].Priority {
+					functions = append(functions[:f+1], append([]Function{cmds[j]}, functions[f+1:]...)...)
+					// logs.Warn(`functions = append(functions[:f+1], append([]Function{cmds[j]}, functions[f+1:]...)...)`)
+					break
+				}
+			}
+			if len(functions) == lf {
+				if lf > 0 {
+					if functions[0].Priority < cmds[j].Priority && functions[lf-1].Priority < cmds[j].Priority {
+						functions = append([]Function{cmds[j]}, functions...)
+					} else {
+						functions = append(functions, cmds[j])
+					}
+				} else {
+					functions = append(functions, cmds[j])
+				}
+			}
+		}
+
 		if cmds[j].Cron != "" {
 			cmd := cmds[j]
 			if _, err := c.AddFunc(cmds[j].Cron, func() {
@@ -78,10 +117,60 @@ func AddCommand(prefix string, cmds []Function) {
 				// logs.Warn("任务%v添加成功", cmds[j].Rules[0])
 			}
 		}
+
+		if cmds[j].Server != "" {
+			cmd := cmds[j]
+			ss := strings.Split(cmds[j].Server, " ")
+			if len(ss) > 0 {
+				method := ss[0]
+				path := ss[1]
+				switch method {
+				case "GET":
+					Server.GET(path, func(c *gin.Context) {
+						data, _ := ioutil.ReadAll(c.Request.Body)
+						result := cmd.Handle(&Faker{
+							Message: string(data),
+						})
+						response := make(map[string]string)
+						err := json.Unmarshal([]byte(result.(string)), &response)
+						if err != nil {
+							c.JSON(500, map[string]string{"code": "500", "msg": "internal error"})
+							return
+						}
+						code, ok := response["code"]
+						if ok {
+							c.JSON(Int(code), response)
+						} else {
+							c.JSON(200, map[string]string{"code": "500", "msg": "internal error"})
+						}
+					})
+				case "POST":
+					Server.POST(path, func(c *gin.Context) {
+						data, _ := ioutil.ReadAll(c.Request.Body)
+						result := cmd.Handle(&Faker{
+							Message: string(data),
+						})
+						response := make(map[string]interface{})
+						err := json.Unmarshal([]byte(result.(string)), &response)
+						if err != nil {
+							c.JSON(500, map[string]string{"code": "500", "msg": "internal error"})
+							return
+						}
+						code, ok := response["code"]
+						if ok {
+							c.JSON(Int(code), response)
+						} else {
+							c.JSON(200, map[string]string{"code": "500", "msg": "internal error"})
+						}
+					})
+				}
+			}
+		}
 	}
 }
 
 func handleMessage(sender Sender) {
+	content := TrimHiddenCharacter(sender.GetContent())
 	defer sender.Finish()
 
 	defer func() {
@@ -106,7 +195,7 @@ func handleMessage(sender Sender) {
 		if userID != u && forGroup == "" {
 			return true
 		}
-		if m := regexp.MustCompile(c.Pattern).FindString(sender.GetContent()); m != "" {
+		if m := regexp.MustCompile(c.Pattern).FindString(content); m != "" {
 			mtd = true
 			c.Chan <- sender
 			sender.Reply(<-c.Result)
@@ -114,25 +203,33 @@ func handleMessage(sender Sender) {
 				con = false
 				return false
 			}
+			content = TrimHiddenCharacter(sender.GetContent())
 		}
 		return true
 	})
 	if mtd && !con {
 		return
 	}
-	// if v, ok := waits.Load(key); ok {
-	// 	c := v.(*Carry)
-	// 	if m := regexp.MustCompile(c.Pattern).FindString(sender.GetContent()); m != "" {
-	// 		c.Chan <- sender
-	// 		sender.Reply(<-c.Result)
-	// 		return
-	// 	}
-	// }
+
+	Bucket(fmt.Sprintf("reply%s%d", sender.GetImType(), sender.GetChatID())).Foreach(func(k, v []byte) error {
+		if string(v) == "" {
+			return nil
+		}
+		reg, err := regexp.Compile(string(k))
+		if err == nil {
+			if reg.FindString(content) != "" {
+				sender.Reply(string(v))
+			}
+		}
+		return nil
+	})
+
 	for _, function := range functions {
 		for _, rule := range function.Rules {
 			var matched bool
+
 			if function.FindAll {
-				if res := regexp.MustCompile(rule).FindAllStringSubmatch(sender.GetContent(), -1); len(res) > 0 {
+				if res := regexp.MustCompile(rule).FindAllStringSubmatch(content, -1); len(res) > 0 {
 					tmp := [][]string{}
 					for i := range res {
 						tmp = append(tmp, res[i][1:])
@@ -141,13 +238,13 @@ func handleMessage(sender Sender) {
 					matched = true
 				}
 			} else {
-				if res := regexp.MustCompile(rule).FindStringSubmatch(sender.GetContent()); len(res) > 0 {
+				if res := regexp.MustCompile(rule).FindStringSubmatch(content); len(res) > 0 {
 					sender.SetMatch(res[1:])
 					matched = true
 				}
 			}
 			if matched {
-				logs.Info("%v ==> %v", sender.GetContent(), rule)
+				logs.Info("%v ==> %v", content, rule)
 				if function.Admin && !sender.IsAdmin() {
 					sender.Delete()
 					sender.Disappear()
@@ -161,6 +258,8 @@ func handleMessage(sender Sender) {
 					sender.Reply(rt)
 				}
 				if sender.IsContinue() {
+					sender.ClearContinue()
+					content = TrimHiddenCharacter(sender.GetContent())
 					goto goon
 				}
 				return
@@ -168,18 +267,6 @@ func handleMessage(sender Sender) {
 		}
 	goon:
 	}
-	reply.Foreach(func(k, v []byte) error {
-		if string(v) == "" {
-			return nil
-		}
-		reg, err := regexp.Compile(string(k))
-		if err == nil {
-			if reg.FindString(sender.GetContent()) != "" {
-				sender.Reply(string(v))
-			}
-		}
-		return nil
-	})
 
 	recall := sillyGirl.Get("recall")
 	if recall != "" {
@@ -187,7 +274,7 @@ func handleMessage(sender Sender) {
 		for _, v := range strings.Split(recall, "&") {
 			reg, err := regexp.Compile(v)
 			if err == nil {
-				if reg.FindString(sender.GetContent()) != "" {
+				if reg.FindString(content) != "" {
 					if !sender.IsAdmin() && sender.GetImType() != "wx" {
 						sender.Delete()
 						sender.Reply("本妞清除了不好的消息～", time.Duration(time.Second))
@@ -214,7 +301,7 @@ func FetchCookieValue(ps ...string) string {
 	}
 	match := regexp.MustCompile(key + `=([^;]*);{0,1}`).FindStringSubmatch(cookies)
 	if len(match) == 2 {
-		return match[1]
+		return strings.Trim(match[1], " ")
 	} else {
 		return ""
 	}
