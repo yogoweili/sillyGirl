@@ -37,8 +37,8 @@ jobs:
       run:
         mv dev.go.demo dev.go
 
-    - name: Push to binary
-      run: |
+    - #name: Push to binary
+      #run: |
         n=$(date +%s%3N)
         echo "package core" > core/compile_time.go
         echo "var compiled_at = \"$n\"" >> core/compile_time.go
