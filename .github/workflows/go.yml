@@ -32,7 +32,7 @@ jobs:
         cd develop && git clone https://github.com/ufuckee/jd_cookie.git
     - name:  Git clone pdd
       run:
-        cd develop && git clone https://github.com/cdle/sillyGirl/develop/pdd_fanli    
+        cd develop && git clone https://github.com/hdbjlizhe/fanli_pdd.git  
     - name: Create dev.go
       run:
         mv dev.go.demo dev.go
